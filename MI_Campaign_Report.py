@@ -247,16 +247,15 @@ try:
         "Authorization": f"Basic {encoded_credentials}"
     }
 
-    # Body
+    #ZOOM Auth Response Body
     body = {
         "grant_type": "account_credentials",
         "account_id": zoom_account_id
     }
 
-    # Token API endpoint
     token_url = "https://zoom.us/oauth/token"
 
-    # Make the request
+    #Fetch ZOOM Auth token
     response = requests.post(token_url, headers=headers, data=body)
     access_token = response.json().get('access_token')
 
@@ -268,28 +267,35 @@ try:
     }
 
     def clean_tax_ids(column):
-    # Use a regular expression to remove spaces and dashes for each value in the series
+    #Use a regular expression to remove spaces and dashes for each value in the series
         return column.apply(lambda x: re.sub(r'[-\s]', '', x))
 
-            # Function to preprocess registrants and extract custom questions
+    #Function to preprocess registrants and extract custom questions
     def preprocess_registrants(registrants):
         for registrant in registrants:
-            # Flatten custom questions
+            #Flatten custom questions
             for question in registrant.get('custom_questions', []):
-                # Use the question title as the column name and its value as the value
-                column_name = question['title']  # Truncate column name if too long
+                #Use the question title as the column name and its value as the value
+                column_name = question['title']
                 registrant[column_name] = question['value']
-            # Remove the original custom_questions list to avoid redundancy
             registrant.pop('custom_questions', None)
         return registrants
 
-        # Function to construct URL for effective pagination
+    #Function to construct URL for effective pagination of webinar participants
     def construct_url(instance_id, next_page_token=None):
         url = f"https://api.zoom.us/v2/past_webinars/{instance_id}/participants"
         if next_page_token:
             url += f"?next_page_token={next_page_token}"
         return url
 
+    #Function to construct URL for effective pagination of webinar registrants
+    def construct_url_pre(webinar_id, next_page_token=None):
+        url = f"https://api.zoom.us/v2/webinars/{webinar_id}/registrants"
+        if next_page_token:
+            url += f"?next_page_token={next_page_token}"
+        return url
+
+    #Fetch all necessary webinar data for this session
     try:
         info_session_all_webinars = []
         info_session_all_instances = []
@@ -302,7 +308,6 @@ try:
             next_page_token = None
 
             while True:
-                # Append the next_page_token to the URL if it's not None
                 if next_page_token:
                     webinars_url = f"{base_url}?next_page_token={next_page_token}"
                 
@@ -311,15 +316,15 @@ try:
                 info_session_all_webinars.extend(data['webinars'])
                 next_page_token = data.get('next_page_token')
                 if not next_page_token:
-                    # If there's no next_page_token, exit the loop
                     break
-
-        # Create DataFrame from the collected webinars data
+            
+        #Store all webinar data in df, filter to only include in scope session. Isolate ids into list for use later
         df_webinars = pd.DataFrame(info_session_all_webinars)
         filtered_df = df_webinars[df_webinars['topic'] == 'Michigan Informational Session Webinar']
         webinar_id_isolated = filtered_df['id']
         webinar_ids = webinar_id_isolated.to_list()
 
+        #Iterate through each webinar id to fetch all unique occurence uuid
         for webinar_id in webinar_ids:
             webinar_url = f"https://api.zoom.us/v2/past_webinars/{webinar_id}/instances"
             response = requests.get(webinar_url,headers=headers)
@@ -328,6 +333,7 @@ try:
 
         info_session_occurrence_ids = [occurrence['uuid'] for occurrence in info_session_all_instances]
 
+        #Iterate through each occurence to get participant details
         for instance in info_session_occurrence_ids:
             next_page_token = None
             while True:
@@ -340,10 +346,11 @@ try:
                 if not next_page_token:
                     break
 
+        #Store participant results in df
         webinars_df_participants = pd.DataFrame(info_session_all_webinar_details)
 
+        #Extract occurence ids once again, this time extracting the id and not uuid
         for webinar_id in webinar_ids:
-            # Fetch webinar details to get occurrence IDs
             webinar_url = f'https://api.zoom.us/v2/webinars/{webinar_id}?show_previous_occurrences=true'
             response = requests.get(webinar_url, headers=headers)
             webinar_data = response.json()
@@ -351,6 +358,7 @@ try:
             
             occurrence_ids = [occurrence['occurrence_id'] for occurrence in occurrences]
 
+            #Iterate through each occurence, store all registrant data
             for occurrence_id in occurrence_ids:
                 next_page_token = ' '
                 
@@ -364,31 +372,51 @@ try:
 
                     if not next_page_token:
                         break
+            
+            #Get registrants for webinars that have not yet occurred
+            for webinar_id in webinar_ids:
+                next_page_token = None
+                            
+                while True:
+                    pre_webinar_url = construct_url_pre(webinar_id,next_page_token)
+                    response = requests.get(pre_webinar_url, headers=headers)
+                    pre_registrant_data = response.json()
+                    pre_registrants = preprocess_registrants(pre_registrant_data.get('registrants', []))
+                    info_session_all_webinar_details_reg.extend(pre_registrants)
+                    next_page_token = pre_registrant_data.get('next_page_token', '')
 
-        # Convert to DataFrame
+                    if not next_page_token:
+                        break
+
+        #Store registrants in df
         webinars_df_registrants = pd.DataFrame(info_session_all_webinar_details_reg)
 
-        info_session_merged_df = pd.merge(webinars_df_registrants,webinars_df_participants, left_on='id', right_on='registrant_id',how='left')
+        #Merge registrant and partcipant dataframes
+        if len(webinars_df_participants) > 0:
+            info_session_merged_df = pd.merge(webinars_df_registrants,webinars_df_participants, left_on='id', right_on='registrant_id',how='left')
+        else:
+            info_session_merged_df = webinars_df_registrants
 
+        #Call clean TaxID function
         info_session_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'] = clean_tax_ids(info_session_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
     except Exception as e:
         pass
 
-    #All webinars will come from one of these two users (hhaexchangewebinar,providerexperience)
 
+    #Fetch all necessary webinar data for this session
     try:
         edi_all_webinars = []
         edi_all_instances = []
         edi_all_webinar_details = []
         edi_all_webinar_details_reg = []
 
+        #Get all webinar IDs for these two users
         for user_id in user_ids:
             base_url = f"https://api.zoom.us/v2/users/{user_id}/webinars"
             webinars_url = base_url
             next_page_token = None
 
             while True:
-                # Append the next_page_token to the URL if it's not None
                 if next_page_token:
                     webinars_url = f"{base_url}?next_page_token={next_page_token}"
                 
@@ -397,16 +425,15 @@ try:
                 edi_all_webinars.extend(data['webinars'])
                 next_page_token = data.get('next_page_token')
                 if not next_page_token:
-                    # If there's no next_page_token, exit the loop
                     break
 
-        # Create DataFrame from the collected webinars data
+        #Store all webinar data in df, filter to only include in scope session. Isolate ids into list for use later
         df_webinars = pd.DataFrame(edi_all_webinars)
         filtered_df = df_webinars[df_webinars['topic'] == 'Michigan Department of Health and Human Services: EDI Provider Onboarding Webinar']
         webinar_id_isolated = filtered_df['id']
         webinar_ids = webinar_id_isolated.to_list()
 
-
+        #Iterate through each webinar id to fetch all unique occurence uuids
         for webinar_id in webinar_ids:
             webinar_url = f"https://api.zoom.us/v2/past_webinars/{webinar_id}/instances"
             response = requests.get(webinar_url,headers=headers)
@@ -415,6 +442,7 @@ try:
 
         edi_occurrence_ids = [occurrence['uuid'] for occurrence in edi_all_instances]
 
+        #Iterate through each occurence to get participant details
         for instance in edi_occurrence_ids:
             next_page_token = None
             while True:
@@ -427,10 +455,11 @@ try:
                 if not next_page_token:
                     break
 
+        #Store participant results in df
         edi_webinars_df_participants = pd.DataFrame(edi_all_webinar_details)
 
+        #Extract occurence ids once again, this time extracting the id and not uuid
         for webinar_id in webinar_ids:
-            # Fetch webinar details to get occurrence IDs
             webinar_url = f'https://api.zoom.us/v2/webinars/{webinar_id}?show_previous_occurrences=true'
             response = requests.get(webinar_url, headers=headers)
             webinar_data = response.json()
@@ -438,6 +467,7 @@ try:
             
             occurrence_ids_2 = [occurrence['occurrence_id'] for occurrence in occurrences]
 
+            #Iterate through each occurence, store all registrant data
             for occurrence_id in occurrence_ids_2:
                 next_page_token = ' '
                 
@@ -452,29 +482,49 @@ try:
                     if not next_page_token:
                         break
 
-        # Convert to DataFrame
+            #Get registrants for webinars that have not yet occurred
+            for webinar_id in webinar_ids:
+                next_page_token = None
+                            
+                while True:
+                    pre_webinar_url = construct_url_pre(webinar_id,next_page_token)
+                    response = requests.get(pre_webinar_url, headers=headers)
+                    pre_registrant_data = response.json()
+                    pre_registrants = preprocess_registrants(pre_registrant_data.get('registrants', []))
+                    edi_all_webinar_details_reg.extend(pre_registrants)
+                    next_page_token = pre_registrant_data.get('next_page_token', '')
+
+                    if not next_page_token:
+                        break
+
+        #Store registrants in df
         edi_webinars_df_registrants = pd.DataFrame(edi_all_webinar_details_reg)
 
-        edi_webinar_merged_df = pd.merge(edi_webinars_df_registrants,edi_webinars_df_participants, left_on='id', right_on='registrant_id',how='left')
+        #Merge registrant and partcipant dataframes
+        if len(edi_webinars_df_participants) >0:
+            edi_webinar_merged_df = pd.merge(edi_webinars_df_registrants,edi_webinars_df_participants, left_on='id', right_on='registrant_id',how='left')
+        else:
+            edi_webinar_merged_df = edi_webinars_df_registrants
 
+        #Call clean TaxID function
         edi_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'] = clean_tax_ids(edi_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
     except Exception as e:
         pass
 
-    #All webinars will come from one of these two users (hhaexchangewebinar,providerexperience)
+    #Fetch all necessary webinar data for this session
     try:
         sut_all_webinars = []
         sut_all_instances = []
         sut_all_webinar_details = []
         sut_all_webinar_details_reg = []
 
+        #Get all webinar IDs for these two users
         for user_id in user_ids:
             base_url = f"https://api.zoom.us/v2/users/{user_id}/webinars"
             webinars_url = base_url
             next_page_token = None
 
             while True:
-                # Append the next_page_token to the URL if it's not None
                 if next_page_token:
                     webinars_url = f"{base_url}?next_page_token={next_page_token}"
                 
@@ -483,16 +533,15 @@ try:
                 sut_all_webinars.extend(data['webinars'])
                 next_page_token = data.get('next_page_token')
                 if not next_page_token:
-                    # If there's no next_page_token, exit the loop
                     break
 
-        # Create DataFrame from the collected webinars data
+        #Store all webinar data in df, filter to only include in scope session. Isolate ids into list for use later
         df_webinars = pd.DataFrame(sut_all_webinars)
         filtered_df = df_webinars[df_webinars['topic'] == 'Michigan Department of Health and Human Services System User Training']
         webinar_id_isolated = filtered_df['id']
         webinar_ids = webinar_id_isolated.to_list()
 
-
+        #Iterate through each webinar id to fetch all unique occurence uuids
         for webinar_id in webinar_ids:
             webinar_url = f"https://api.zoom.us/v2/past_webinars/{webinar_id}/instances"
             response = requests.get(webinar_url,headers=headers)
@@ -501,6 +550,7 @@ try:
 
         sut_occurrence_ids = [occurrence['uuid'] for occurrence in sut_all_instances]
 
+        #Iterate through each occurence to get participant details
         for instance in sut_occurrence_ids:
             next_page_token = None
             while True:
@@ -513,10 +563,11 @@ try:
                 if not next_page_token:
                     break
 
+        #Store participant results in df
         sut_df_participants = pd.DataFrame(sut_all_webinar_details)
 
+        #Extract occurence ids once again, this time extracting the id and not uuid
         for webinar_id in webinar_ids:
-            # Fetch webinar details to get occurrence IDs
             webinar_url = f'https://api.zoom.us/v2/webinars/{webinar_id}?show_previous_occurrences=true'
             response = requests.get(webinar_url, headers=headers)
             webinar_data = response.json()
@@ -524,6 +575,7 @@ try:
             
             occurrence_ids_2 = [occurrence['occurrence_id'] for occurrence in occurrences]
 
+            #Iterate through each occurence, store all registrant data
             for occurrence_id in occurrence_ids_2:
                 next_page_token = ' '
                 
@@ -538,29 +590,49 @@ try:
                     if not next_page_token:
                         break
 
-        # Convert to DataFrame
+           #Get registrants for webinars that have not yet occurred
+            for webinar_id in webinar_ids:
+                next_page_token = None
+                            
+                while True:
+                    pre_webinar_url = construct_url_pre(webinar_id,next_page_token)
+                    response = requests.get(pre_webinar_url, headers=headers)
+                    pre_registrant_data = response.json()
+                    pre_registrants = preprocess_registrants(pre_registrant_data.get('registrants', []))
+                    sut_all_webinar_details_reg.extend(pre_registrants)
+                    next_page_token = pre_registrant_data.get('next_page_token', '')
+
+                    if not next_page_token:
+                        break
+
+        #Store registrants in df
         sut_webinars_df_registrants = pd.DataFrame(sut_all_webinar_details_reg)
 
-        sut_webinar_merged_df = pd.merge(sut_webinars_df_registrants,sut_df_participants, left_on='id', right_on='registrant_id',how='left')
+        #Merge registrant and partcipant dataframes
+        if len(sut_df_participants) > 0:
+            sut_webinar_merged_df = pd.merge(sut_webinars_df_registrants,sut_df_participants, left_on='id', right_on='registrant_id',how='left')
+        else:
+            sut_webinar_merged_df = sut_webinars_df_registrants
 
-        sut_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'] = clean_tax_ids(edi_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
+        #Call clean TaxID function
+        sut_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'] = clean_tax_ids(sut_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
     except Exception as e:
         pass
 
+    #Fetch all necessary webinar data for this session
     try:
-        #All webinars will come from one of these two users (hhaexchangewebinar,providerexperience)
         gs_all_webinars = []
         gs_all_instances = []
         gs_all_webinar_details = []
         gs_all_webinar_details_reg = []
 
+        #Get all webinar IDs for these two users
         for user_id in user_ids:
             base_url = f"https://api.zoom.us/v2/users/{user_id}/webinars"
             webinars_url = base_url
             next_page_token = None
 
             while True:
-                # Append the next_page_token to the URL if it's not None
                 if next_page_token:
                     webinars_url = f"{base_url}?next_page_token={next_page_token}"
                 
@@ -569,16 +641,15 @@ try:
                 gs_all_webinars.extend(data['webinars'])
                 next_page_token = data.get('next_page_token')
                 if not next_page_token:
-                    # If there's no next_page_token, exit the loop
                     break
 
-        # Create DataFrame from the collected webinars data
+        #Store all webinar data in df, filter to only include in scope session. Isolate ids into list for use later
         df_webinars = pd.DataFrame(gs_all_webinars)
         filtered_df = df_webinars[df_webinars['topic'] == 'Michigan Health and Human Services Getting Started Webinar']
         webinar_id_isolated = filtered_df['id']
         webinar_ids = webinar_id_isolated.to_list()
 
-
+        #Iterate through each webinar id to fetch all unique occurence uuids
         for webinar_id in webinar_ids:
             webinar_url = f"https://api.zoom.us/v2/past_webinars/{webinar_id}/instances"
             response = requests.get(webinar_url,headers=headers)
@@ -587,6 +658,7 @@ try:
 
         gs_occurrence_ids = [occurrence['uuid'] for occurrence in gs_all_instances]
 
+        #Iterate through each occurence to get participant details
         for instance in gs_occurrence_ids:
             next_page_token = None
             while True:
@@ -599,10 +671,11 @@ try:
                 if not next_page_token:
                     break
 
+        #Store participant results in df
         gs_webinars_df_participants = pd.DataFrame(gs_all_webinar_details)
 
+        #Extract occurence ids once again, this time extracting the id and not uuid
         for webinar_id in webinar_ids:
-            # Fetch webinar details to get occurrence IDs
             webinar_url = f'https://api.zoom.us/v2/webinars/{webinar_id}?show_previous_occurrences=true'
             response = requests.get(webinar_url, headers=headers)
             webinar_data = response.json()
@@ -610,6 +683,7 @@ try:
             
             occurrence_ids_2 = [occurrence['occurrence_id'] for occurrence in occurrences]
 
+             #Iterate through each occurence, store all registrant data
             for occurrence_id in occurrence_ids_2:
                 next_page_token = ' '
                 
@@ -624,28 +698,49 @@ try:
                     if not next_page_token:
                         break
 
-        # Convert to DataFrame
+            #Get registrants for webinars that have not yet occurred
+            for webinar_id in webinar_ids:
+                next_page_token = None
+                            
+                while True:
+                    pre_webinar_url = construct_url_pre(webinar_id,next_page_token)
+                    response = requests.get(pre_webinar_url, headers=headers)
+                    pre_registrant_data = response.json()
+                    pre_registrants = preprocess_registrants(pre_registrant_data.get('registrants', []))
+                    gs_all_webinar_details_reg.extend(pre_registrants)
+                    next_page_token = pre_registrant_data.get('next_page_token', '')
+
+                    if not next_page_token:
+                        break
+
+        #Store registrants in df
         gs_webinars_df_registrants = pd.DataFrame(gs_all_webinar_details_reg)
 
-        gs_webinar_merged_df = pd.merge(gs_webinars_df_registrants,gs_webinars_df_participants, left_on='id', right_on='registrant_id',how='left')
+        #Merge registrant and partcipant dataframes
+        if len(gs_webinars_df_participants)>0:
+            gs_webinar_merged_df = pd.merge(gs_webinars_df_registrants,gs_webinars_df_participants, left_on='id', right_on='registrant_id',how='left')
+        else:
+            gs_webinar_merged_df = gs_webinars_df_registrants
 
+        #Call clean TaxID function
         gs_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'] = clean_tax_ids(gs_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
     except Exception as e:
         pass
 
+    #Fetch all necessary webinar data for this session
     try:
         openhours_all_webinars = []
         openhours_all_instances = []
         openhours_all_webinar_details = []
         openhours_all_webinar_details_reg = []
 
+        #Get all webinar IDs for these two users
         for user_id in user_ids:
             base_url = f"https://api.zoom.us/v2/users/{user_id}/webinars"
             webinars_url = base_url
             next_page_token = None
 
             while True:
-                # Append the next_page_token to the URL if it's not None
                 if next_page_token:
                     webinars_url = f"{base_url}?next_page_token={next_page_token}"
                 
@@ -654,16 +749,15 @@ try:
                 openhours_all_webinars.extend(data['webinars'])
                 next_page_token = data.get('next_page_token')
                 if not next_page_token:
-                    # If there's no next_page_token, exit the loop
                     break
 
-        # Create DataFrame from the collected webinars data
+        #Store all webinar data in df, filter to only include in scope session. Isolate ids into list for use later
         df_webinars = pd.DataFrame(openhours_all_webinars)
         filtered_df = df_webinars[df_webinars['topic'] == 'MDHHS - HHAX Open Hours - Onboarding and Adoption Training']
         webinar_id_isolated = filtered_df['id']
         webinar_ids = webinar_id_isolated.to_list()
 
-
+        #Iterate through each webinar id to fetch all unique occurence uuids
         for webinar_id in webinar_ids:
             webinar_url = f"https://api.zoom.us/v2/past_webinars/{webinar_id}/instances"
             response = requests.get(webinar_url,headers=headers)
@@ -672,6 +766,7 @@ try:
 
         openhours_occurrence_ids = [occurrence['uuid'] for occurrence in openhours_all_instances]
 
+        #Iterate through each occurence to get participant details
         for instance in openhours_occurrence_ids:
             next_page_token = None
             while True:
@@ -684,10 +779,11 @@ try:
                 if not next_page_token:
                     break
 
+        #Store participant results in df
         openhours_webinars_df_participants = pd.DataFrame(openhours_all_webinar_details)
 
+        #Extract occurence ids once again, this time extracting the id and not uuid
         for webinar_id in webinar_ids:
-            # Fetch webinar details to get occurrence IDs
             webinar_url = f'https://api.zoom.us/v2/webinars/{webinar_id}?show_previous_occurrences=true'
             response = requests.get(webinar_url, headers=headers)
             webinar_data = response.json()
@@ -695,6 +791,7 @@ try:
             
             occurrence_ids_2 = [occurrence['occurrence_id'] for occurrence in occurrences]
 
+            #Iterate through each occurence, store all registrant data
             for occurrence_id in occurrence_ids_2:
                 next_page_token = ' '
                 
@@ -709,21 +806,59 @@ try:
                     if not next_page_token:
                         break
 
-        # Convert to DataFrame
+            #Get registrants for webinars that have not yet occurred
+            for webinar_id in webinar_ids:
+                next_page_token = None
+                            
+                while True:
+                    pre_webinar_url = construct_url_pre(webinar_id,next_page_token)
+                    response = requests.get(pre_webinar_url, headers=headers)
+                    pre_registrant_data = response.json()
+                    pre_registrants = preprocess_registrants(pre_registrant_data.get('registrants', []))
+                    openhours_all_webinar_details_reg.extend(pre_registrants)
+                    next_page_token = pre_registrant_data.get('next_page_token', '')
+
+                    if not next_page_token:
+                        break
+
+        #Store registrants in df
         openhours_webinars_df_registrants = pd.DataFrame(openhours_all_webinar_details_reg)
 
-        openhours_webinar_merged_df = pd.merge(openhours_webinars_df_registrants,openhours_webinars_df_participants, left_on='id', right_on='registrant_id',how='left')
+        #Merge registrant and partcipant dataframes
+        if len(openhours_webinars_df_participants) > 0:
+            openhours_webinar_merged_df = pd.merge(openhours_webinars_df_registrants,openhours_webinars_df_participants, left_on='id', right_on='registrant_id',how='left')
+        else:
+            openhours_webinar_merged_df = openhours_webinars_df_registrants
 
+        #Call clean TaxID function
         openhours_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'] = clean_tax_ids(openhours_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
     except Exception as e:
         pass
 
+
+    #Add column in cases where no attendance is yet available
+    if 'status_y' not in info_session_merged_df.columns:
+        info_session_merged_df['status_y'] = np.nan
+
+    if 'status_y' not in edi_webinar_merged_df.columns:
+        edi_webinar_merged_df['status_y'] = np.nan
+
+    if 'status_y' not in sut_webinar_merged_df.columns:
+        sut_webinar_merged_df['status_y'] = np.nan
+    
+    if 'status_y' not in gs_webinar_merged_df.columns:
+        gs_webinar_merged_df['status_y'] = np.nan
+
+    if 'status_y' not in openhours_webinar_merged_df.columns:
+        gs_webinar_merged_df['status_y'] = np.nan
+
+    #Distinguish between attendees and registress for each webinar
     try:
         info_session_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'] = info_session_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'].astype(str).str.strip()
         info_session_in_meeting_df = info_session_merged_df[info_session_merged_df['status_y'] == 'in_meeting']
         michigan_jumpoff['ATTENDED_INFO_SESSION'] = michigan_jumpoff['Provider TAX ID'].isin(info_session_in_meeting_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
         michigan_jumpoff['REGISTERED_INFO_SESSION'] = michigan_jumpoff['Provider TAX ID'].isin(info_session_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
-    except NameError:
+    except (NameError, KeyError):
         michigan_jumpoff['ATTENDED_INFO_SESSION'] = False
         michigan_jumpoff['REGISTERED_INFO_SESSION'] = False
 
@@ -731,8 +866,8 @@ try:
         edi_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'] = edi_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'].astype(str).str.strip()
         edi_webinar_in_meeting_df = edi_webinar_merged_df[edi_webinar_merged_df['status_y'] == 'in_meeting']
         michigan_jumpoff['ATTENDED_EDI_SESSION'] = michigan_jumpoff['Provider TAX ID'].isin(edi_webinar_in_meeting_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
-        michigan_jumpoff['REGISTERED_EDI_SESSION'] = michigan_jumpoff['Provider TAX ID'].isin(edi_webinar_in_meeting_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
-    except NameError:
+        michigan_jumpoff['REGISTERED_EDI_SESSION'] = michigan_jumpoff['Provider TAX ID'].isin(edi_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
+    except (NameError, KeyError):
         michigan_jumpoff['ATTENDED_EDI_SESSION'] = False
         michigan_jumpoff['REGISTERED_EDI_SESSION'] = False
 
@@ -740,8 +875,8 @@ try:
         sut_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'] = sut_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'].astype(str).str.strip()
         sut_webinar_in_meeting_df = sut_webinar_merged_df[sut_webinar_merged_df['status_y'] == 'in_meeting']
         michigan_jumpoff['ATTENDED_SUT_SESSION'] = michigan_jumpoff['Provider TAX ID'].isin(sut_webinar_in_meeting_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
-        michigan_jumpoff['REGISTERED_SUT_SESSION'] = michigan_jumpoff['Provider TAX ID'].isin(sut_webinar_in_meeting_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
-    except NameError:
+        michigan_jumpoff['REGISTERED_SUT_SESSION'] = michigan_jumpoff['Provider TAX ID'].isin(sut_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
+    except (NameError, KeyError):
         michigan_jumpoff['ATTENDED_SUT_SESSION'] = False
         michigan_jumpoff['REGISTERED_SUT_SESSION'] = False
 
@@ -749,20 +884,21 @@ try:
         gs_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'] = gs_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'].astype(str).str.strip()
         gs_webinar_in_meeting_df = gs_webinar_merged_df[gs_webinar_merged_df['status_y'] == 'in_meeting']
         michigan_jumpoff['ATTENDED_GS_SESSION'] = michigan_jumpoff['Provider TAX ID'].isin(gs_webinar_in_meeting_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
-        michigan_jumpoff['REGISTERED_GS_SESSION'] = michigan_jumpoff['Provider TAX ID'].isin(gs_webinar_in_meeting_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
-
-    except NameError:
+        michigan_jumpoff['REGISTERED_GS_SESSION'] = michigan_jumpoff['Provider TAX ID'].isin(gs_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
+    except (NameError, KeyError):
         michigan_jumpoff['ATTENDED_GS_SESSION'] = False
         michigan_jumpoff['REGISTERED_GS_SESSION'] = False
+
     try:
         openhours_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'] = openhours_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'].astype(str).str.strip()
         openhours_webinar_in_meeting_df = openhours_webinar_merged_df[openhours_webinar_merged_df['status_y'] == 'in_meeting']
         michigan_jumpoff['ATTENDED_OH_SESSION'] = michigan_jumpoff['Provider TAX ID'].isin(openhours_webinar_in_meeting_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
-        michigan_jumpoff['REGISTERED_OH_SESSION'] = michigan_jumpoff['Provider TAX ID'].isin(openhours_webinar_in_meeting_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
-    except NameError:
+        michigan_jumpoff['REGISTERED_OH_SESSION'] = michigan_jumpoff['Provider TAX ID'].isin(openhours_webinar_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
+    except (NameError, KeyError):
         michigan_jumpoff['ATTENDED_OH_SESSION'] = False
         michigan_jumpoff['REGISTERED_OH_SESSION'] = False
 
+    #Get latest LMS data
     ctx = snowflake.connector.connect(
         user = snowflake_user,
         role = snowflake_role,
@@ -783,6 +919,7 @@ try:
 
     merged_df = pd.merge(michigan_jumpoff, docebo_df, left_on='Provider TAX ID',right_on='AGENCY_TAX_ID',how='left')
 
+    #Check append LMS status for each provider
     lms_update_df = merged_df[['Provider TAX ID', 'Provider Name', 'Provider NPI Number', 'Tax ID+NPI',
         'Provider Address 1', 'Provider City', 'Provider State',
         'Provider Zip Code', 'Provider Contact Name', 'Provider Email Address',
@@ -816,6 +953,7 @@ try:
 
     import_list = import_list.applymap(str)
 
+    #Build time series dataset
     now = datetime.now()
     current_day = f"{now.day:02d}"
     current_year = now.year
@@ -824,6 +962,8 @@ try:
     date = f"{current_month}/{current_day}/{current_year}"
 
     time_series_dataframe = pd.DataFrame({'EVENT_DATE': [date]})
+
+    import_list['EVENT_DATE'] = pd.DataFrame({'EVENT_DATE': [date]})
 
     time_series_dataframe['PROVIDER_COUNT'] = import_list['PROVIDER_TAX_ID'].nunique()
     time_series_dataframe['COMPLETED_ONBOARDING_FORM'] = import_list[import_list['EVV_SYSTEM_CHOICE'] != 'Missing Cognito Form']['PROVIDER_TAX_ID'].nunique()
@@ -840,7 +980,12 @@ try:
     time_series_dataframe['YES_INTEGRATE_EDI'] = import_list[import_list['EVV_SYSTEM_CHOICE'] == 'Yes - I currently have my own EVV system and would like to integrate with HHAX (EDI)']['PROVIDER_TAX_ID'].nunique()
     time_series_dataframe['YES_USE_HHAX'] = import_list[import_list['EVV_SYSTEM_CHOICE'] == 'Yes - I currently have my own EVV system but would like to use HHAX (Free EVV)']['PROVIDER_TAX_ID'].nunique()
     time_series_dataframe['NO_EVV_SYSTEM'] = import_list[import_list['EVV_SYSTEM_CHOICE'] == 'No - I currently do not have my own EVV system and would like to use HHAX (Free EVV)']['PROVIDER_TAX_ID'].nunique()
+    time_series_dataframe['LMS_NOTREGISTERED'] = import_list[import_list['LEARNING_PLAN_ENROLLMENT_STATUS'] == 'Not Registered']['PROVIDER_TAX_ID'].nunique()
+    time_series_dataframe['LMS_ENROLLED'] = import_list[import_list['LEARNING_PLAN_ENROLLMENT_STATUS'] == 'Enrolled']['PROVIDER_TAX_ID'].nunique()
+    time_series_dataframe['LMS_INPROGRESS'] = import_list[import_list['LEARNING_PLAN_ENROLLMENT_STATUS'] == 'In Progress']['PROVIDER_TAX_ID'].nunique()
+    time_series_dataframe['LMS_COMPLETED'] = import_list[import_list['LEARNING_PLAN_ENROLLMENT_STATUS'] == 'Completed']['PROVIDER_TAX_ID'].nunique()
 
+    #Load trend data into Snowflake
     time_series_dataframe['EVENT_DATE'] = pd.to_datetime(time_series_dataframe['EVENT_DATE'])
     for col in time_series_dataframe.columns:
         if col != 'EVENT_DATE':
@@ -855,12 +1000,12 @@ try:
     for i in range(len(chunks) - 1):
         time_series_dataframe[chunks[i]:chunks[i + 1]].to_sql(table_name, engine, if_exists='append', index=False)
 
-    cs = ctx.cursor()
-    delete = """ delete from "PC_FIVETRAN_DB"."CAMPAIGN_REPORTING"."MICHIGAN"
-    """
-    payload = cs.execute(delete)
+    import_list.drop(['EVENT_DATE'],axis=1,inplace=True)
 
-    chunk_size = 1000  # define chunk size
+    import_list['EVENT_DATE'] = date
+
+    #Load row by row data into Snowflake
+    chunk_size = 1000
     chunks = [x for x in range(0, len(import_list), chunk_size)] + [len(import_list)]
     table_name = 'michigan' 
 
