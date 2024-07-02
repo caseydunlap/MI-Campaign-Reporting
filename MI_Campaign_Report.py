@@ -327,8 +327,15 @@ headers = {
 }
 
 def clean_tax_ids(column):
-#Use a regular expression to remove spaces and dashes for each value in the series
-    return column.apply(lambda x: re.sub(r'[-\s]', '', x))
+    def clean_value(x):
+        if isinstance(x, str):
+            return re.sub(r'[-\s]', '', x)
+        elif pd.isnull(x):
+            return np.nan
+        else:
+            return str(int(x))
+
+    return column.apply(clean_value)
 
 #Function to preprocess registrants and extract custom questions
 def preprocess_registrants(registrants):
@@ -355,6 +362,7 @@ def construct_url_pre(webinar_id, next_page_token=None):
         url += f"?next_page_token={next_page_token}"
     return url
 
+#Fetch all necessary webinar data for this session
 #Fetch all necessary webinar data for this session
 try:
     info_session_all_webinars = []
@@ -1434,6 +1442,111 @@ try:
 except Exception as e:
     pass
 
+try:
+    getting_ready_all_webinars = []
+    getting_ready_all_instances = []
+    getting_ready_all_webinar_details = []
+    getting_ready_all_webinar_details_reg = []
+
+    for user_id in user_ids:
+        base_url = f"https://api.zoom.us/v2/users/{user_id}/webinars"
+        webinars_url = base_url
+        next_page_token = None
+
+        while True:
+            if next_page_token:
+                webinars_url = f"{base_url}?next_page_token={next_page_token}"
+            
+            response = requests.get(webinars_url, headers=headers)
+            data = response.json()
+            getting_ready_all_webinars.extend(data['webinars'])
+            next_page_token = data.get('next_page_token')
+            if not next_page_token:
+                break
+        
+    #Store all webinar data in df, filter to only include in scope session. Isolate ids into list for use later
+    gr_df_webinars = pd.DataFrame(getting_ready_all_webinars)
+    gr_filtered_df = gr_df_webinars[gr_df_webinars['topic'] == 'Get Ready for EVV - Michigan']
+    gr_webinar_id_isolated = gr_filtered_df['id']
+    gr_webinar_ids = gr_webinar_id_isolated.to_list()
+
+    #Iterate through each webinar id to fetch all unique occurence uuid
+    for webinar_id in gr_webinar_ids:
+        webinar_url = f"https://api.zoom.us/v2/past_webinars/{webinar_id}/instances"
+        response = requests.get(webinar_url,headers=headers)
+        instances_data = response.json()
+        getting_ready_all_instances.extend(instances_data.get('webinars', []))
+
+    getting_ready_occurrence_ids = [occurrence['uuid'] for occurrence in getting_ready_all_instances]
+
+    #Iterate through each occurence to get participant details
+    for instance in getting_ready_occurrence_ids:
+        next_page_token = None
+        while True:
+            participants_url = construct_url(instance, next_page_token)
+            response = requests.get(participants_url, headers=headers)
+            participants_data = response.json()
+            getting_ready_all_webinar_details.extend(participants_data.get('participants', []))
+            next_page_token = participants_data.get('next_page_token')
+
+            if not next_page_token:
+                break
+
+    #Store participant results in df
+    getting_ready_webinars_df_participants = pd.DataFrame(getting_ready_all_webinar_details)
+
+    #Extract occurence ids once again, this time extracting the id and not uuid
+    for webinar_id in gr_webinar_ids:
+        webinar_url = f'https://api.zoom.us/v2/webinars/{webinar_id}?show_previous_occurrences=true'
+        response = requests.get(webinar_url, headers=headers)
+        webinar_data = response.json()
+        occurrences = webinar_data.get('occurrences', [])
+        
+        occurrence_ids = [occurrence['occurrence_id'] for occurrence in occurrences]
+
+        #Iterate through each occurence, store all registrant data
+        for occurrence_id in occurrence_ids:
+            next_page_token = ' '
+            
+            while True:
+                webinars_url = f'https://api.zoom.us/v2/webinars/{webinar_id}/registrants?occurrence_id={occurrence_id}&next_page_token={next_page_token}'
+                response = requests.get(webinars_url, headers=headers)
+                registrant_data = response.json()
+                registrants = preprocess_registrants(registrant_data.get('registrants', []))
+                getting_ready_all_webinar_details_reg.extend(registrants)
+                next_page_token = registrant_data.get('next_page_token', '')
+
+                if not next_page_token:
+                    break
+        
+        #Get registrants for webinars that have not yet occurred
+        for webinar_id in gr_webinar_ids:
+            next_page_token = None
+                        
+            while True:
+                pre_webinar_url = construct_url_pre(webinar_id,next_page_token)
+                response = requests.get(pre_webinar_url, headers=headers)
+                pre_registrant_data = response.json()
+                pre_registrants = preprocess_registrants(pre_registrant_data.get('registrants', []))
+                getting_ready_all_webinar_details_reg.extend(pre_registrants)
+                next_page_token = pre_registrant_data.get('next_page_token', '')
+
+                if not next_page_token:
+                    break
+
+    #Store registrants in df
+    getting_ready_df_registrants = pd.DataFrame(getting_ready_all_webinar_details_reg)
+
+    #Merge registrant and partcipant dataframes
+    if len(getting_ready_webinars_df_participants) > 0:
+        getting_ready_merged_df = pd.merge(getting_ready_df_registrants,getting_ready_webinars_df_participants, left_on='id', right_on='registrant_id',how='left')
+    else:
+        getting_ready_merged_df = getting_ready_df_registrants
+
+    #Call clean TaxID function
+    getting_ready_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'] = clean_tax_ids(getting_ready_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
+except Exception as e:
+    pass
 
 #Add column in cases where no attendance is yet available
 if 'status_y' not in info_session_merged_df.columns:
@@ -1465,6 +1578,9 @@ if 'status_y' not in hh_oh_webinar_merged_df.columns:
 
 if 'status_y' not in hh_gs_webinar_merged_df.columns:
     hh_gs_webinar_merged_df['status_y'] = np.nan
+
+if 'status_y' not in getting_ready_merged_df.columns:
+    getting_ready_merged_df['status_y'] = np.nan
 
 #Distinguish between attendees and registress for each webinar
 try:
@@ -1557,6 +1673,16 @@ except (NameError, KeyError):
     michigan_jumpoff['ATTENDED_HH_OH_SESSION'] = False
     michigan_jumpoff['REGISTERED_HH_OH_SESSION'] = False
 
+try:
+    getting_ready_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'] = getting_ready_merged_df['Please enter your Tax ID number (without dashes) for attendance purposes.'].astype(str).str.strip()
+    gr_webinar_in_meeting_df = getting_ready_merged_df[getting_ready_merged_df['status_y'] == 'in_meeting']
+    michigan_jumpoff['ATTENDED_PCS_GR_SESSION'] = michigan_jumpoff['Provider TAX ID'].isin(gr_webinar_in_meeting_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
+    michigan_jumpoff['REGISTERED_PCS_GR_SESSION'] = michigan_jumpoff['Provider TAX ID'].isin(gr_webinar_in_meeting_df['Please enter your Tax ID number (without dashes) for attendance purposes.'])
+except (NameError, KeyError):
+    michigan_jumpoff['ATTENDED_PCS_GR_SESSION'] = False
+    michigan_jumpoff['REGISTERED_PCS_GR_SESSION'] = False
+
+
 #Get latest LMS data
 ctx = snowflake.connector.connect(
     user=snowflake_user,
@@ -1572,6 +1698,20 @@ where ((learning_plan_name = 'Michigan Home Health Provider Learning Plan') or (
 """
 payload = cs.execute(script)
 docebo_df = pd.DataFrame.from_records(iter(payload), columns=[x[0] for x in payload.description])
+
+cs = ctx.cursor()
+script = """
+select * from PC_FIVETRAN_DB.HUBSPOT.MARKETING_ENGAGEMENTS
+where lower(event_name) like '%mi roadshow%'
+"""
+payload = cs.execute(script)
+pcs_in_person_infosession = pd.DataFrame.from_records(iter(payload), columns=[x[0] for x in payload.description])
+
+pcs_event_registration = pcs_in_person_infosession[pcs_in_person_infosession['MARKETING_ENGAGEMENT_TYPE'] == 'event-registration']
+pcs_event_attendance = pcs_in_person_infosession[pcs_in_person_infosession['MARKETING_ENGAGEMENT_TYPE'] == 'event-attendance']
+
+michigan_jumpoff['PCS_REGISTERED_INFO_SESSION_INPERSON'] = michigan_jumpoff['Provider TAX ID'].isin(pcs_event_registration['TAX_ID'])
+michigan_jumpoff['PCS_ATTENDED_INFO_SESSION_INPERSON'] = michigan_jumpoff['Provider TAX ID'].isin(pcs_event_attendance['TAX_ID'])
 
 docebo_df = docebo_df.dropna(subset=['AGENCY_TAX_ID'])
 
@@ -1599,7 +1739,8 @@ lms_update_df = final_merged_df[['Provider TAX ID', 'Provider Name', 'Provider N
     'REGISTERED_GS_SESSION', 'ATTENDED_OH_SESSION', 'REGISTERED_OH_SESSION',
     'ATTENDED_HH_INFO_SESSION','REGISTERED_HH_INFO_SESSION','ATTENDED_HH_EDI_SESSION','REGISTERED_HH_EDI_SESSION',
     'ATTENDED_HH_SUT_SESSION','REGISTERED_HH_SUT_SESSION','ATTENDED_HH_GS_SESSION','REGISTERED_HH_GS_SESSION',
-    'ATTENDED_HH_OH_SESSION','REGISTERED_HH_OH_SESSION','LEARNING_PLAN_ENROLLMENT_STATUS','LEARNING_PLAN_ENROLLMENT_STATUS_help']]
+    'ATTENDED_HH_OH_SESSION','REGISTERED_HH_OH_SESSION','ATTENDED_PCS_GR_SESSION','REGISTERED_PCS_GR_SESSION','PCS_REGISTERED_INFO_SESSION_INPERSON','PCS_ATTENDED_INFO_SESSION_INPERSON',
+    'LEARNING_PLAN_ENROLLMENT_STATUS','LEARNING_PLAN_ENROLLMENT_STATUS_help']]
 
 lms_update_df['LEARNING_PLAN_ENROLLMENT_STATUS'] = lms_update_df['LEARNING_PLAN_ENROLLMENT_STATUS'].fillna('Not Registered')
 lms_update_df['LEARNING_PLAN_ENROLLMENT_STATUS_help'] = lms_update_df['LEARNING_PLAN_ENROLLMENT_STATUS_help'].fillna('Not Registered')
@@ -1616,7 +1757,8 @@ final_merged_df =  final_merged_df[['Provider TAX ID', 'Provider Name', 'Provide
     'REGISTERED_GS_SESSION', 'ATTENDED_OH_SESSION', 'REGISTERED_OH_SESSION',
     'ATTENDED_HH_INFO_SESSION','REGISTERED_HH_INFO_SESSION','ATTENDED_HH_EDI_SESSION','REGISTERED_HH_EDI_SESSION',
     'ATTENDED_HH_SUT_SESSION','REGISTERED_HH_SUT_SESSION','ATTENDED_HH_GS_SESSION','REGISTERED_HH_GS_SESSION',
-    'ATTENDED_HH_OH_SESSION','REGISTERED_HH_OH_SESSION','LEARNING_PLAN_ENROLLMENT_STATUS','LEARNING_PLAN_ENROLLMENT_STATUS_help',
+    'ATTENDED_HH_OH_SESSION','REGISTERED_HH_OH_SESSION','ATTENDED_PCS_GR_SESSION','REGISTERED_PCS_GR_SESSION','LEARNING_PLAN_ENROLLMENT_STATUS','LEARNING_PLAN_ENROLLMENT_STATUS_help',
+    'PCS_REGISTERED_INFO_SESSION_INPERSON','PCS_ATTENDED_INFO_SESSION_INPERSON',
     'DoesYourAgencyCurrentlyUseAnEVVSystemToCaptureTheStartTimeEndTimeAndLocationOfTheMembersService']]
 
 import_list = final_merged_df.rename(columns={'Provider TAX ID' : 'PROVIDER_TAX_ID', 'Provider Name' : 'PROVIDER_NAME', 'Provider NPI Number' : 'PROVIDER_NPI_NUMBER', 'Tax ID+NPI' : 'TAX_ID_NPI',
@@ -1690,6 +1832,8 @@ time_series_dataframe['REGISTERED_GS_SESSION'] = import_list[import_list['REGIST
 time_series_dataframe['ATTENDED_GS_SESSION'] = import_list[import_list['ATTENDED_GS_SESSION'] != 'False']['PROVIDER_TAX_ID'].nunique()
 time_series_dataframe['REGISTERED_OH_SESSION'] = import_list[import_list['REGISTERED_OH_SESSION'] != 'False']['PROVIDER_TAX_ID'].nunique()
 time_series_dataframe['ATTENDED_OH_SESSION'] = import_list[import_list['ATTENDED_OH_SESSION'] != 'False']['PROVIDER_TAX_ID'].nunique()
+time_series_dataframe['PCS_ATTENDED_INFO_SESSION_INPERSON'] = import_list[import_list['PCS_ATTENDED_INFO_SESSION_INPERSON'] != 'False']['PROVIDER_TAX_ID'].nunique()
+time_series_dataframe['PCS_REGISTERED_INFO_SESSION_INPERSON'] = import_list[import_list['PCS_REGISTERED_INFO_SESSION_INPERSON'] != 'False']['PROVIDER_TAX_ID'].nunique()
 time_series_dataframe['REGISTERED_HH_INFO_SESSION'] = import_list[import_list['REGISTERED_HH_INFO_SESSION'] != 'False']['PROVIDER_TAX_ID'].nunique()
 time_series_dataframe['ATTENDED_HH_INFO_SESSION'] = import_list[import_list['ATTENDED_HH_INFO_SESSION'] != 'False']['PROVIDER_TAX_ID'].nunique()
 time_series_dataframe['REGISTERED_HH_EDI_SESSION'] = import_list[import_list['REGISTERED_HH_EDI_SESSION'] != 'False']['PROVIDER_TAX_ID'].nunique()
@@ -1700,6 +1844,8 @@ time_series_dataframe['REGISTERED_HH_GS_SESSION'] = import_list[import_list['REG
 time_series_dataframe['ATTENDED_HH_GS_SESSION'] = import_list[import_list['ATTENDED_HH_GS_SESSION'] != 'False']['PROVIDER_TAX_ID'].nunique()
 time_series_dataframe['REGISTERED_HH_OH_SESSION'] = import_list[import_list['REGISTERED_HH_OH_SESSION'] != 'False']['PROVIDER_TAX_ID'].nunique()
 time_series_dataframe['ATTENDED_HH_OH_SESSION'] = import_list[import_list['ATTENDED_HH_OH_SESSION'] != 'False']['PROVIDER_TAX_ID'].nunique()
+time_series_dataframe['ATTENDED_PCS_GR_SESSION'] = import_list[import_list['ATTENDED_PCS_GR_SESSION'] != 'False']['PROVIDER_TAX_ID'].nunique()
+time_series_dataframe['REGISTERED_PCS_GR_SESSION'] = import_list[import_list['REGISTERED_PCS_GR_SESSION'] != 'False']['PROVIDER_TAX_ID'].nunique()
 time_series_dataframe['YES_INTEGRATE_EDI'] = import_list[import_list['EVV_SYSTEM_CHOICE'] == 'Yes - I currently have my own EVV system and would like to integrate with HHAX (EDI)']['PROVIDER_TAX_ID'].nunique()
 time_series_dataframe['YES_USE_HHAX'] = import_list[import_list['EVV_SYSTEM_CHOICE'] == 'Yes - I currently have my own EVV system but would like to use HHAX (Free EVV)']['PROVIDER_TAX_ID'].nunique()
 time_series_dataframe['NO_EVV_SYSTEM'] = import_list[import_list['EVV_SYSTEM_CHOICE'] == 'No - I currently do not have my own EVV system and would like to use HHAX (Free EVV)']['PROVIDER_TAX_ID'].nunique()
@@ -1713,10 +1859,11 @@ time_series_dataframe['LMS_HH_INPROGRESS'] = import_list[import_list['LEARNING_P
 time_series_dataframe['LMS_HH_COMPLETED'] = import_list[import_list['LEARNING_PLAN_ENROLLMENT_STATUS_HH'] == 'Completed']['PROVIDER_TAX_ID'].nunique()
 hh_portals_created = import_list[(import_list['WAVE'] == 'Home Help') & (import_list['PORTAL_CREATED'] == 'True')]['PROVIDER_TAX_ID'].nunique()
 health_portals_created = import_list[(import_list['WAVE'] == 'Home Health') & (import_list['PORTAL_CREATED'] == 'True')]['PROVIDER_TAX_ID'].nunique()
+pcs_portals_created = import_list[(import_list['WAVE'] == 'PCS') & (import_list['PORTAL_CREATED'] == 'True')]['PROVIDER_TAX_ID'].nunique()
 time_series_dataframe['HH_PORTALS_CREATED'] = hh_portals_created
 time_series_dataframe['HEALTH_PORTALS_CREATED'] = health_portals_created
+time_series_dataframe['PCS_PORTALS_CREATED'] = pcs_portals_created
 time_series_dataframe['PORTALS_CREATED'] = import_list[import_list['PORTAL_CREATED'] == 'True']['PROVIDER_TAX_ID'].nunique()
-
 
 #Load trend data into Snowflake
 time_series_dataframe['EVENT_DATE'] = pd.to_datetime(time_series_dataframe['EVENT_DATE'])
