@@ -13,7 +13,7 @@ Since there is no specific setup or installation process required, this output f
 The script runs once a day at 930 am EST. Outputs are posted to internal Sharepoints folders, and Snowflake tables.
 
 ## Methodology
-###Data Sources###
+### Data Sources
 The data sources utilized in the report compilation:
   - Internal Microsoft Excel Files
   - HHAeXchange
