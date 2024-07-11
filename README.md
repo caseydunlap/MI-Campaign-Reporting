@@ -21,13 +21,12 @@ The data sources utilized in the report compilation:
   - Docebo
   - Zoom
   - HubSpot
-
-Identifiers: 
-  - For fields determined by a logical test, the federal tax number is used as the identifer. 
-
-
+    
+### Identifiers
+  - For fields determined by a logical test, the federal tax number is used as the identifier.
 
 ## Field Definitions
+### Fields
 PROVIDER_TAX_ID: Federal tax number associated with provider, as provided to HHaExchange by state counterparties.
 PROVIDER_NAME: Provider name, as provided to HHAeXchange by state counterparties.
 PROVIDER_NPI_NUMBER: Assigned Provider NPI number, as provided to HHAeXchange by state counterparties.
