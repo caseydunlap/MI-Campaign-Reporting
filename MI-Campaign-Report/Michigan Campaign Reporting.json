@@ -1,0 +1,35 @@
+{
+  "name" : "Michigan Campaign Reporting",
+  "jobMode" : "SCRIPT",
+  "description" : "",
+  "role" : "arn:aws:iam::123073001123:role/bianalytics_etlglue_role",
+  "executionProperty" : {
+    "maxConcurrentRuns" : 1
+  },
+  "command" : {
+    "name" : "pythonshell",
+    "scriptLocation" : "s3://aws-glue-assets-123073001123-us-east-1/scripts/Michigan Campaign Reporting.py",
+    "pythonVersion" : "3.9"
+  },
+  "defaultArguments" : {
+    "--enable-job-insights" : "false",
+    "--additional-python-modules" : "python-dateutil==2.9.0,snowflake-connector-python==3.10.0,pytz==2024.1,snowflake-sqlalchemy==1.5.3,openpyxl==3.1.3,cryptography==42.0.8",
+    "--enable-observability-metrics" : "false",
+    "--enable-glue-datacatalog" : "true",
+    "library-set" : "analytics",
+    "--job-language" : "python",
+    "--TempDir" : "s3://aws-glue-assets-123073001123-us-east-1/temporary/"
+  },
+  "maxRetries" : 5,
+  "allocatedCapacity" : 0,
+  "timeout" : 2880,
+  "maxCapacity" : 0.0625,
+  "glueVersion" : "3.0",
+  "executionClass" : "STANDARD",
+  "sourceControlDetails" : {
+    "provider" : "GITHUB",
+    "repository" : "MI-Campaign-Reporting",
+    "branch" : "main",
+    "folder" : "MI-Campaign-Report"
+  }
+}
