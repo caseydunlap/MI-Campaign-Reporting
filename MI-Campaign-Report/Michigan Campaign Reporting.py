@@ -1832,6 +1832,8 @@ where lower(event_name) like '%mi roadshow%'
 payload = cs.execute(script)
 pcs_in_person_infosession = pd.DataFrame.from_records(iter(payload), columns=[x[0] for x in payload.description])
 
+pcs_in_person_infosession['TAX_ID'] = clean_tax_ids(pcs_in_person_infosession['TAX_ID'])
+
 pcs_event_registration = pcs_in_person_infosession[pcs_in_person_infosession['MARKETING_ENGAGEMENT_TYPE'] == 'event-registration']
 pcs_event_attendance = pcs_in_person_infosession[pcs_in_person_infosession['MARKETING_ENGAGEMENT_TYPE'] == 'event-attendance']
 
@@ -1844,13 +1846,13 @@ health_docebo_df = docebo_df[docebo_df['LEARNING_PLAN_NAME'] == 'Michigan Home H
 
 help_docebo_df = docebo_df[docebo_df['LEARNING_PLAN_NAME'] == 'Michigan Home Help Provider Learning Plan'] 
 
-# Merge michigan_jumpoff with health_docebo_df
+#Merge michigan_jumpoff with health_docebo_df
 merged_health_df = pd.merge(michigan_jumpoff, health_docebo_df, left_on='Provider TAX ID', right_on='AGENCY_TAX_ID', how='left', suffixes=('_michigan', '_health'))
 
-# Merge the resulting dataframe with help_docebo_df
+#Merge the resulting dataframe with help_docebo_df
 final_merged_df = pd.merge(merged_health_df, help_docebo_df, left_on='Provider TAX ID', right_on='AGENCY_TAX_ID', how='left', suffixes=('', '_help'))
 
-# Drop duplicate columns that may arise from the merge
+#Drop duplicate columns that may arise from the merge
 final_merged_df = final_merged_df.drop_duplicates(subset=['Wave', 'Provider TAX ID'])
 
 #Append LMS status for each provider
@@ -1895,10 +1897,10 @@ import_list['EVV_SYSTEM_CHOICE'] = import_list['EVV_SYSTEM_CHOICE'].fillna('Miss
 
 import_list = import_list.applymap(str)
 
-# Get the current date and time in UTC
+#Get the current date and time in UTC
 utc_now = datetime.now(pytz.utc)
 
-# Convert to Eastern Time
+#Convert to Eastern Time
 eastern = pytz.timezone('US/Eastern')
 now = utc_now.astimezone(eastern)
 
@@ -1925,9 +1927,10 @@ cs = ctx.cursor()
 script = """
 select
 "Federal Tax Number" as TAX_ID,
-"Platform Type" as PLATFORM_TAG
+"Platform Type" as PLATFORM_TAG,
+"Application Provider Id" as PROVIDER_ID
 from "ANALYTICS"."BI"."DIMPROVIDER"
-where "Is Demo" = 'FALSE'
+where "Is Demo" = 'FALSE' and lower("Environemnt") like '%clo%'
 """
 
 payload = cs.execute(script)
@@ -1935,7 +1938,7 @@ portals = pd.DataFrame.from_records(iter(payload), columns=[x[0] for x in payloa
 
 import_list['PORTAL_CREATED'] = import_list['PROVIDER_TAX_ID'].isin(portals['TAX_ID']).astype(str)
 
-import_list = import_list.merge(portals[['TAX_ID', 'PLATFORM_TAG']], left_on='PROVIDER_TAX_ID', right_on='TAX_ID', how='left')
+import_list = import_list.merge(portals[['TAX_ID', 'PLATFORM_TAG',"PROVIDER_ID"]], left_on='PROVIDER_TAX_ID', right_on='TAX_ID', how='left')
 
 import_list['PORTAL_TYPE'] = import_list['PLATFORM_TAG']
 
@@ -2001,7 +2004,7 @@ for col in time_series_dataframe.columns:
 # Construct the SQLAlchemy connection string
 connection_string = f"snowflake://{snowflake_user}@{snowflake_account}/{snowflake_fivetran_db}/CAMPAIGN_REPORTING?warehouse={snowflake_bizops_wh}&role={snowflake_role}&authenticator=externalbrowser"
 
-# Instantiate SQLAlchemy engine with the private key
+#Instantiate SQLAlchemy engine with the private key
 engine = create_engine(
     connection_string,
     connect_args={
@@ -2063,30 +2066,30 @@ response = requests.get(f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive
 
 drive_id = None
 
-# Check if the request was successful
+#Check if the request was successful
 if response.status_code == 200:
     drives = response.json().get('value', [])
     for drive in drives:
-        # Check if drive name is "Documents" and store its ID
+        #Check if drive name is "Documents" and store its ID
         if drive['name'] == 'Documents':
             drive_id = drive['id']
-            break  # Exit the loop as we found the drive ID
+            break  #Exit the loop as we found the drive ID
 
 current_date = now.strftime("%Y-%m-%d")
 file_name = f'Michigan Campaign Report - {current_date}.xlsx'
 
 destination_path = f'Campaign Reports/Michigan/{file_name}'
 
-# Full endpoint to the folder
+#Full endpoint to the folder
 upload_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{destination_path}:/content"
 
-# Create an Excel file in memory
+#Create an Excel file in memory
 output = io.BytesIO()
 
 with pd.ExcelWriter(output, engine='openpyxl') as writer:
     import_list.to_excel(writer, index=False, sheet_name='Michigan')
 
-# Move the cursor to the beginning of the stream
+#Move the cursor to the beginning of the stream
 output.seek(0)
 
 headers = {
