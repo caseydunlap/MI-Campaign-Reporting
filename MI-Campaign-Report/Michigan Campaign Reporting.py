@@ -285,6 +285,85 @@ url = f'https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{final_nested_c
 response = requests.get(url, headers=headers)
 cognito_form = pd.read_excel(BytesIO(response.content))
 
+url = f"https://graph.microsoft.com/v1.0/sites/{sharepoint_url_base}:/personal/{sharepoint_url_end}"
+
+headers = {
+    "Authorization": f"Bearer {access_token}"
+}
+
+response = requests.get(url, headers=headers)
+site_data = response.json()
+site_id = site_data.get("id")
+
+headers = {
+    "Authorization": f"Bearer {access_token}",
+    "Accept": "application/json"
+}
+
+response = requests.get(f"https://graph.microsoft.com/v1.0/sites/{site_id}/drives", headers=headers)
+
+drive_id = None
+if response.status_code == 200:
+    drives = response.json().get('value', [])
+    for drive in drives:
+        if drive['name']== 'OneDrive':
+            drive_id = drive['id']
+            break
+
+url = f'https://graph.microsoft.com/v1.0/drives/{drive_id}/root/children'
+
+headers = {
+    'Authorization': f'Bearer {access_token}'
+}
+
+response = requests.get(url, headers=headers)
+items = response.json()
+
+for item in items['value']:
+    if item['name'] == 'Cognito Forms':
+        item_id = item['id']
+        break
+
+url = f'https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/children'
+
+response = requests.get(url, headers=headers)
+sub_items = response.json()
+
+for item in sub_items['value']:
+    if item['name'] == 'Michigan':
+        item_id = item['id']
+        break
+
+url = f'https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/children'
+
+response = requests.get(url, headers=headers)
+child_items = response.json()
+
+for item in child_items['value']:
+    if item['name'] == 'MI_Payers':
+        item_id = item['id']
+        break
+
+url = f'https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/children'
+
+response = requests.get(url, headers=headers)
+sub_child_items = response.json()
+
+url = f'https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/children'
+
+response = requests.get(url, headers=headers)
+nested_children_final = response.json().get('value', [])
+
+for child in nested_children_final:
+    if child['name'] == 'MI_Payers.xlsx':
+        final_nested_child_item_id = child['id']
+        break
+
+url = f'https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{final_nested_child_item_id}/content'
+
+response = requests.get(url, headers=headers)
+michigan_payers = pd.read_excel(BytesIO(response.content), dtype={'Provider TAX ID': str})
+
 #Function to format Cognito data into usable format
 def reformat_df(df):
     df['FederalTaxID'] = df.groupby('MichiganDepartmentOfHealthAndHu_Id')['FederalTaxID'].transform(lambda x: x.ffill().bfill())
@@ -1895,7 +1974,19 @@ import_list = final_merged_df.rename(columns={'Provider TAX ID' : 'PROVIDER_TAX_
 
 import_list['EVV_SYSTEM_CHOICE'] = import_list['EVV_SYSTEM_CHOICE'].fillna('Missing Cognito Form')
 
-import_list = import_list.applymap(str)
+#Join Payer list to output
+michigan_payers.dropna(subset=['Provider TAX ID'], inplace=True)
+
+payer_df = michigan_payers.groupby('Provider TAX ID').agg({
+    'Payer': lambda x: ', '.join(sorted(set(x))),
+    'Wave': lambda x: ', '.join(sorted(set(x)))
+}).reset_index()
+
+payer_df['Provider TAX ID'] = clean_tax_ids(payer_df['Provider TAX ID'])
+
+temp_import_list = pd.merge(import_list, payer_df, left_on=['PROVIDER_TAX_ID','WAVE'],right_on=['Provider TAX ID', 'Wave'], how='left')
+
+import_list = temp_import_list.applymap(str)
 
 #Get the current date and time in UTC
 utc_now = datetime.now(pytz.utc)
@@ -1942,7 +2033,9 @@ import_list = import_list.merge(portals[['TAX_ID', 'PLATFORM_TAG',"PROVIDER_ID"]
 
 import_list['PORTAL_TYPE'] = import_list['PLATFORM_TAG']
 
-import_list.drop(columns=['TAX_ID','PLATFORM_TAG'], inplace=True)
+import_list.drop(columns=['TAX_ID','PLATFORM_TAG','Provider TAX ID','Wave'], inplace=True)
+
+import_list = import_list.rename(columns={'Payer':'PAYERS'})
 
 time_series_dataframe['PROVIDER_COUNT'] = import_list['PROVIDER_TAX_ID'].nunique()
 hh_provider_count = import_list[import_list['WAVE'] == 'Home Help']['PROVIDER_TAX_ID'].nunique()
