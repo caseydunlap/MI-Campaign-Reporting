@@ -381,6 +381,67 @@ cognito_form_formatted = cognito_form_formatted.dropna(subset=['FederalTaxID'])
 
 cognito_form_formatted['FederalTaxID'] = cognito_form_formatted['FederalTaxID'].astype(int).astype(str)
 
+#Isolate null emails in an attempt to enrich with Salesforce data
+null_emails = michigan_jumpoff[michigan_jumpoff['Provider Email Address'].str.strip().isnull() | (michigan_jumpoff['Provider Email Address'].str.strip() == "")]
+null_email_ids_str = ', '.join(f"'{str(id)}'" for id in null_emails['Provider TAX ID'].tolist())
+
+#Get Contact info for null emails from Snowflake
+ctx = snowflake.connector.connect(
+    user=snowflake_user,
+    account=snowflake_account,
+    private_key=private_key_bytes,
+    role=snowflake_role,
+    warehouse=snowflake_bizops_wh)
+    
+cs = ctx.cursor()
+
+script = f"""
+select 
+a.TAX_ID_C,
+c.CONTACT_ROLE_C,
+c.email
+from PC_FIVETRAN_DB.SALESFORCE.CONTACT c
+left join PC_FIVETRAN_DB.SALESFORCE.ACCOUNT a on a.ID = c.account_id
+where a.tax_id_c in ({null_email_ids_str}) and
+c.email is not null
+order by a.TAX_ID_C
+"""
+payload = cs.execute(script)
+sfdc_contacts = pd.DataFrame.from_records(iter(payload), columns=[x[0] for x in payload.description])
+
+#Cleanup some data and build a role hierarchy
+filtered_contacts = sfdc_contacts[sfdc_contacts['CONTACT_ROLE_C'].notnull()]
+
+role_hierarchy = ['Administrator', 'Owner', 'Operations']
+
+#Build a function to rank roles based on hierarchy
+def assign_rank(role):
+    if any(coord in role for coord in ['Coordinator']):
+        return len(role_hierarchy)
+    elif role in role_hierarchy:
+        return role_hierarchy.index(role)
+    else:
+        return float('inf')
+
+#Apply the function to assign ranks
+filtered_contacts['ROLE_RANK'] = filtered_contacts['CONTACT_ROLE_C'].apply(assign_rank)
+
+#Sort and filter the ranked contacts dataframe
+sorted_contacts = filtered_contacts.sort_values(by=['TAX_ID_C', 'ROLE_RANK']).drop_duplicates(subset=['TAX_ID_C'], keep='first')
+
+#Some data cleanup on identifiers just in case
+sorted_contacts['TAX_ID_C'] = sorted_contacts['TAX_ID_C'].astype(str).str.strip()
+michigan_jumpoff['Provider TAX ID'] = michigan_jumpoff['Provider TAX ID'].astype(str).str.strip()
+
+#Build a dictionary of new emails
+email_mapping = dict(zip(sorted_contacts['TAX_ID_C'], sorted_contacts['EMAIL']))
+
+#Append the new emails, keeping existing emails in tact
+michigan_jumpoff['Provider Email Address'] = michigan_jumpoff.apply(lambda row: email_mapping.get(row['Provider TAX ID'], row['Provider Email Address']), axis=1)
+
+#Do some final data cleanup
+michigan_jumpoff.reset_index(drop=True,inplace=True)
+
 #Set ZOOM API Credentials
 credentials = f"{zoom_client_id}:{zoom_secret_id}"
 encoded_credentials = base64.b64encode(credentials.encode()).decode()
