@@ -77,6 +77,8 @@ The data sources utilized in the report compilation:
 - PORTAL_CREATED: Boolean indicating if a provider has had their portal created.
 - PORTAL_TYPE: Field indicating if customer is paid or free user.
 - EVENT_DATE: Date of report compilation.
+- PROVIDER_ID: Environment specific provider id.
+- PAYERS: Payers associated with the provider.
 
 ## Known Issues
 
